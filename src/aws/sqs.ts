@@ -1,19 +1,15 @@
-import { sqs } from './clients'
-import { ListQueuesCommand } from '@aws-sdk/client-sqs'
-import { ReceiveMessageCommand } from '@aws-sdk/client-sqs'
+import { sqs, withTimeout } from './clients'
+import {
+  ListQueuesCommand,
+  ReceiveMessageCommand,
+  SendMessageCommand,
+} from '@aws-sdk/client-sqs'
 
-export const listQueues = async () => {
-  const res = await sqs.send(new ListQueuesCommand({}))
-  return res.QueueUrls ?? []
-}
+export const listQueues = () =>
+  withTimeout(sqs.send(new ListQueuesCommand({}))).then(r => r.QueueUrls ?? [])
 
-export const listMessages = async (queueUrl: string) => {
-  const res = await sqs.send(
-    new ReceiveMessageCommand({
-      QueueUrl: queueUrl,
-      MaxNumberOfMessages: 10,
-      WaitTimeSeconds: 0,
-    })
-  )
-  return res.Messages ?? []
-}
+export const receiveMessages = (queueUrl: string, max = 10) =>
+  withTimeout(sqs.send(new ReceiveMessageCommand({ QueueUrl: queueUrl, MaxNumberOfMessages: max }))).then(r => r.Messages ?? [])
+
+export const sendMessage = (queueUrl: string, body: string) =>
+  withTimeout(sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: body })))
