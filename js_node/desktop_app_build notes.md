@@ -29,7 +29,7 @@ It'll ask a few questions — the important ones:
 **5. Build the final app**
 ```bash
 npx tauri build
-# → produces a .app (and .dmg installer) under src-tauri/target/release/bundle/
+# → produces a .app (and .dmg installer) under js_node-tauri/target/release/bundle/
 ```
 
 ---

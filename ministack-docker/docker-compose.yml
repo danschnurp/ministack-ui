@@ -1,4 +1,5 @@
 version: "3.8"
+name: Ministack
 
 services:
   ministack:
@@ -17,7 +18,16 @@ services:
     environment:
       - LOCALSTACK_ENDPOINT=http://ministack:4566
     depends_on:
-      - ministack
+      - "ministack"
 
-
-
+  react-ui:
+    build:
+      context: ../js_node
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    environment:
+      - VITE_API_BASE=/api
+      - VITE_AWS_REGION=us-east-1
+    depends_on:
+      - "ministack"
