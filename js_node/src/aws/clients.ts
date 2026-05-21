@@ -31,3 +31,31 @@ export function withTimeout<T>(promise: Promise<T>, ms = 3000): Promise<T> {
     ),
   ])
 }
+
+import { LambdaClient } from '@aws-sdk/client-lambda'
+import { KinesisClient } from '@aws-sdk/client-kinesis'
+import { SNSClient } from '@aws-sdk/client-sns'
+import { APIGatewayClient } from '@aws-sdk/client-api-gateway'
+import { CloudWatchClient } from '@aws-sdk/client-cloudwatch'
+import { EC2Client } from '@aws-sdk/client-ec2'
+import { EventBridgeClient } from '@aws-sdk/client-eventbridge'
+import { GlueClient } from '@aws-sdk/client-glue'
+import { IAMClient } from '@aws-sdk/client-iam'
+import { FirehoseClient } from '@aws-sdk/client-firehose'
+import { KMSClient } from '@aws-sdk/client-kms'
+import { SFNClient } from '@aws-sdk/client-sfn'
+import { WAFV2Client } from '@aws-sdk/client-wafv2'
+
+export const lambda    = new LambdaClient(sharedConfig)
+export const kinesis   = new KinesisClient(sharedConfig)
+export const sns       = new SNSClient(sharedConfig)
+export const apigw     = new APIGatewayClient(sharedConfig)
+export const cw        = new CloudWatchClient(sharedConfig)
+export const ec2       = new EC2Client(sharedConfig)
+export const eb        = new EventBridgeClient(sharedConfig)
+export const glue      = new GlueClient(sharedConfig)
+export const iam       = new IAMClient(sharedConfig)
+export const firehose  = new FirehoseClient(sharedConfig)
+export const kms       = new KMSClient(sharedConfig)
+export const sfn       = new SFNClient(sharedConfig)
+export const wafv2     = new WAFV2Client(sharedConfig)
