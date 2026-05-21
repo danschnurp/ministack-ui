@@ -103,9 +103,4 @@ docker-compose up
 This will start:
 - MiniStack on port 4566
 - Streamlit UI on port 8501
-
----
-
-## Back to Main README
-
-[← Back to main README](README.md)
+- 
