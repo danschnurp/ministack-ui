@@ -12,8 +12,18 @@ import pages_sqs as sqs_page
 import pages_sns as sns_page
 import pages_lambda as lambda_page
 import pages_kinesis as kinesis_page
+import pages_firehose as firehose_page
 import pages_logs as logs_page
+import pages_cloudwatch as cloudwatch_page
 import pages_apigateway as apigw_page
+import pages_ec2 as ec2_page
+import pages_vpc as vpc_page
+import pages_eventbridge as eventbridge_page
+import pages_glue as glue_page
+import pages_iam as iam_page
+import pages_kms as kms_page
+import pages_stepfunctions as stepfunctions_page
+import pages_waf as waf_page
 from aws_client import client
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -23,10 +33,14 @@ with st.sidebar:
 
     PAGES = {
         "Storage": {"S3": s3_page, "DynamoDB": dynamo_page},
-        "Streaming": {"Kinesis": kinesis_page},
-        "Messaging": {"SQS": sqs_page, "SNS": sns_page},
-        "Compute": {"Lambda": lambda_page, "API Gateway": apigw_page},
-        "Observability": {"Logs": logs_page},
+        "Compute": {"EC2": ec2_page, "Lambda": lambda_page},
+        "Networking": {"VPC": vpc_page, "API Gateway": apigw_page, "WAF": waf_page},
+        "Streaming": {"Kinesis Data Stream": kinesis_page, "Kinesis Firehose": firehose_page},
+        "Messaging": {"SQS": sqs_page, "SNS": sns_page, "EventBridge": eventbridge_page},
+        "Orchestration": {"Step Functions": stepfunctions_page},
+        "Data": {"Glue": glue_page},
+        "Security": {"IAM": iam_page, "KMS": kms_page},
+        "Observability": {"CloudWatch": cloudwatch_page, "Logs": logs_page},
     }
 
     if "page" not in st.session_state:
@@ -55,4 +69,3 @@ for group, items in PAGES.items():
     if current_label in items:
         items[current_label].render()
         break
-
