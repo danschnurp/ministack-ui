@@ -32,7 +32,7 @@ def render():
             st.info("No CodeBuild projects found.")
             return
 
-        projects = cb.batch_get_projects(names=project_names).get("projects", []) if project_names else []
+        projects = cb.batch_get_projects(names=project_names).get("projects", [])
 
         for p in projects:
             pname = p.get("name", "—")

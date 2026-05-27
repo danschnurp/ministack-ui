@@ -42,13 +42,19 @@ def render():
                 pname = p.get("Name", "—")
                 version = p.get("Version", "—")
                 value = p.get("Value", "")
-                display_val = "••••••••" if ptype == "SecureString" else (value[:60] + "…" if len(value) > 60 else value)
+                is_secure = ptype == "SecureString"
 
                 with st.expander(f"{icon} `{pname}` (v{version})"):
                     c1, c2 = st.columns(2)
                     c1.metric("Type", ptype)
                     c2.metric("Version", version)
-                    st.code(value, language="text")
+                    if is_secure:
+                        if st.checkbox("Reveal value", key=f"ssm_reveal_{pname}"):
+                            st.code(value, language="text")
+                        else:
+                            st.code("••••••••", language="text")
+                    else:
+                        st.code(value, language="text")
                     st.caption(f"Modified: {str(p.get('LastModifiedDate', '—'))[:19]}")
 
     with tab2:

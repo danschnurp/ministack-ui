@@ -72,14 +72,16 @@ def render():
     if col_back.button("← Back to list"):
         st.session_state.sm_selected = None
         st.rerun()
-    if col_del.button("🗑️ Delete", type="secondary"):
-        try:
-            sm.delete_secret(SecretId=selected, ForceDeleteWithoutRecovery=True)
-            st.success(f"Deleted: {selected}")
-            st.session_state.sm_selected = None
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
+    with col_del.popover("🗑️ Delete"):
+        st.warning(f"Permanently delete **{selected}**? This cannot be undone.")
+        if st.button("Confirm delete", type="primary", key="sm_confirm_del"):
+            try:
+                sm.delete_secret(SecretId=selected, ForceDeleteWithoutRecovery=True)
+                st.success(f"Deleted: {selected}")
+                st.session_state.sm_selected = None
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
     st.markdown(f"### {selected}")
     if secret.get("Description"):

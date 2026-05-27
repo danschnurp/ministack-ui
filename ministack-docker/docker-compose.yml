@@ -20,14 +20,14 @@ services:
     depends_on:
       - "ministack"
 
-  react-ui:
-    build:
-      context: ../js_node
-      dockerfile: Dockerfile
-    ports:
-      - "8080:80"
-    environment:
-      - VITE_API_BASE=/api
-      - VITE_AWS_REGION=us-east-1
-    depends_on:
-      - "ministack"
+#  react-ui:
+#    build:
+#      context: ../js_node
+#      dockerfile: Dockerfile
+#    ports:
+#      - "8080:80"
+#    environment:
+#      - VITE_API_BASE=/api
+#      - VITE_AWS_REGION=us-east-1
+#    depends_on:
+#      - "ministack"

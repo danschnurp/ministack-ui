@@ -7,9 +7,7 @@ STATE_ICONS = {
     "deleting": "🟠", "deleted": "⚫", "error": "🔴",
 }
 
-SNAPSHOT_STATE_ICONS = {
-    "completed": "🟢", "pending": "🟡", "error": "🔴",
-}
+SNAPSHOT_STATE_ICONS = {"completed": "🟢", "pending": "🟡", "error": "🔴"}
 
 
 def render():
@@ -104,17 +102,17 @@ def render():
             st.error(str(e))
             snapshots = []
 
-        st.caption(f"{len(snapshots)} snapshot(s)")
-        if col2 := st.columns([6, 1])[1]:
-            if col2.button("🔄 Refresh", key="ebs_snap_refresh", use_container_width=True):
-                st.rerun()
+        snap_col1, snap_col2 = st.columns([6, 1])
+        snap_col1.caption(f"{len(snapshots)} snapshot(s)")
+        if snap_col2.button("🔄 Refresh", key="ebs_snap_refresh", use_container_width=True):
+            st.rerun()
 
         if snapshots:
             rows = [
                 {
                     "Snapshot ID": s.get("SnapshotId", "—"),
                     "Volume ID": s.get("VolumeId", "—"),
-                    "State": s.get("State", "—"),
+                    "State": SNAPSHOT_STATE_ICONS.get(s.get("State", ""), "⚪") + " " + s.get("State", "—"),
                     "Size (GiB)": s.get("VolumeSize", "—"),
                     "Description": s.get("Description", "—")[:40],
                     "Started": str(s.get("StartTime", "—"))[:10],
