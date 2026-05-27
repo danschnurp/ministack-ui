@@ -43,11 +43,20 @@ echo "=====================================================" | tee -a "$LOG_FILE
 # ── optional clean ────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--clean" ]]; then
   info "Cleaning existing resources…"
-  $AWS s3 rb s3://ministack-raw-data      --force 2>/dev/null || true
+  $AWS s3 rb s3://ministack-raw-data       --force 2>/dev/null || true
   $AWS s3 rb s3://ministack-processed-data --force 2>/dev/null || true
   $AWS s3 rb s3://ministack-firehose-dest  --force 2>/dev/null || true
   $AWS s3 rb s3://ministack-glue-scripts   --force 2>/dev/null || true
+  $AWS s3 rb s3://ministack-audit-logs     --force 2>/dev/null || true
+  $AWS s3 rb s3://ministack-cfn-artifacts  --force 2>/dev/null || true
   ok "S3 buckets removed"
+  $AWS cloudformation delete-stack --stack-name ministack-infra 2>/dev/null || true
+  $AWS rds delete-db-instance --db-instance-identifier ministack-postgres \
+    --skip-final-snapshot 2>/dev/null || true
+  $AWS elasticache delete-replication-group --replication-group-id ministack-redis \
+    --no-retain-primary-cluster 2>/dev/null || true
+  $AWS opensearch delete-domain --domain-name ministack-search 2>/dev/null || true
+  ok "Extended resources cleaned"
 fi
 
 # =============================================================================
@@ -821,6 +830,731 @@ $AWS wafv2 create-web-acl \
 ok "WAF Web ACL: ministack-web-acl"
 
 # =============================================================================
+# 17. Secrets Manager
+# =============================================================================
+info "── Secrets Manager ───────────────────────────────────"
+
+run "Secret: ministack/app/config" \
+  secretsmanager create-secret \
+  --name ministack/app/config \
+  --description "MiniStack application config" \
+  --secret-string '{"db_password":"s3cr3t","api_key":"ak-ministack-abc123","jwt_secret":"jwt-ministack-xyz"}'
+
+run "Secret: ministack/db/credentials" \
+  secretsmanager create-secret \
+  --name ministack/db/credentials \
+  --description "MiniStack DB credentials" \
+  --secret-string '{"username":"ministack_app","password":"d8tapassw0rd","host":"localhost","port":5432}'
+
+ok "Secrets Manager: 2 secrets ready"
+
+# =============================================================================
+# 18. SSM Parameter Store
+# =============================================================================
+info "── SSM Parameter Store ───────────────────────────────"
+
+run "SSM: /ministack/env" \
+  ssm put-parameter \
+  --name /ministack/env \
+  --value production \
+  --type String \
+  --description "Deployment environment"
+
+run "SSM: /ministack/log-level" \
+  ssm put-parameter \
+  --name /ministack/log-level \
+  --value INFO \
+  --type String
+
+run "SSM: /ministack/db/url (SecureString)" \
+  ssm put-parameter \
+  --name /ministack/db/url \
+  --value "postgresql://localhost:5432/ministack" \
+  --type SecureString \
+  --description "Database connection URL"
+
+run "SSM: /ministack/feature-flags" \
+  ssm put-parameter \
+  --name /ministack/feature-flags \
+  --value '{"newCheckout":true,"darkMode":false,"betaSearch":true}' \
+  --type String
+
+ok "SSM: 4 parameters ready"
+
+# =============================================================================
+# 19. ACM
+# =============================================================================
+info "── ACM ───────────────────────────────────────────────"
+
+CERT_ARN=$($AWS acm request-certificate \
+  --domain-name ministack.example.com \
+  --validation-method DNS \
+  --subject-alternative-names "*.ministack.example.com" "api.ministack.example.com" \
+  --tags Key=Name,Value=ministack-wildcard \
+  --query 'CertificateArn' --output text 2>/dev/null || \
+  $AWS acm list-certificates \
+  --query "CertificateSummaryList[?DomainName=='ministack.example.com'].CertificateArn" \
+  --output text)
+ok "ACM: certificate requested ($CERT_ARN)"
+
+# =============================================================================
+# 20. ECR
+# =============================================================================
+info "── ECR ───────────────────────────────────────────────"
+
+run "ECR repo: ministack/api" \
+  ecr create-repository \
+  --repository-name ministack/api \
+  --image-scanning-configuration scanOnPush=true \
+  --encryption-configuration encryptionType=AES256 \
+  --tags Key=Name,Value=ministack-api
+
+run "ECR repo: ministack/worker" \
+  ecr create-repository \
+  --repository-name ministack/worker \
+  --image-scanning-configuration scanOnPush=true \
+  --tags Key=Name,Value=ministack-worker
+
+ok "ECR: 2 repositories ready"
+
+# =============================================================================
+# 21. ECS
+# =============================================================================
+info "── ECS ───────────────────────────────────────────────"
+
+run "ECS cluster: ministack" \
+  ecs create-cluster \
+  --cluster-name ministack \
+  --capacity-providers FARGATE FARGATE_SPOT \
+  --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1 \
+  --tags key=Name,value=ministack
+
+$AWS ecs register-task-definition \
+  --family ministack-api \
+  --network-mode awsvpc \
+  --requires-compatibilities FARGATE \
+  --cpu "256" \
+  --memory "512" \
+  --execution-role-arn "$LAMBDA_ROLE_ARN" \
+  --container-definitions '[{
+    "name":"api",
+    "image":"ministack/api:latest",
+    "portMappings":[{"containerPort":8080,"protocol":"tcp"}],
+    "environment":[
+      {"name":"ENV","value":"production"},
+      {"name":"PORT","value":"8080"}
+    ],
+    "logConfiguration":{
+      "logDriver":"awslogs",
+      "options":{
+        "awslogs-group":"/ministack/api",
+        "awslogs-region":"us-east-1",
+        "awslogs-stream-prefix":"ecs"
+      }
+    }
+  }]' >> "$LOG_FILE" 2>&1 || true
+ok "ECS task def: ministack-api (Fargate 0.25vCPU/512MB)"
+
+$AWS ecs register-task-definition \
+  --family ministack-worker \
+  --network-mode awsvpc \
+  --requires-compatibilities FARGATE \
+  --cpu "512" \
+  --memory "1024" \
+  --execution-role-arn "$LAMBDA_ROLE_ARN" \
+  --container-definitions '[{
+    "name":"worker",
+    "image":"ministack/worker:latest",
+    "environment":[
+      {"name":"QUEUE_URL","value":"http://localhost:4566/000000000000/ministack-orders"},
+      {"name":"WORKERS","value":"4"}
+    ]
+  }]' >> "$LOG_FILE" 2>&1 || true
+ok "ECS task def: ministack-worker (Fargate 0.5vCPU/1GB)"
+
+# =============================================================================
+# 22. Route53
+# =============================================================================
+info "── Route53 ───────────────────────────────────────────"
+
+HOSTED_ZONE_ID=$($AWS route53 create-hosted-zone \
+  --name ministack.example.com \
+  --caller-reference "ministack-$(date +%s)" \
+  --query 'HostedZone.Id' --output text 2>/dev/null | sed 's|/hostedzone/||' || \
+  $AWS route53 list-hosted-zones \
+  --query "HostedZones[?Name=='ministack.example.com.'].Id" --output text | sed 's|/hostedzone/||')
+ok "Route53 hosted zone: ministack.example.com ($HOSTED_ZONE_ID)"
+
+$AWS route53 change-resource-record-sets \
+  --hosted-zone-id "$HOSTED_ZONE_ID" \
+  --change-batch '{
+    "Changes":[
+      {"Action":"CREATE","ResourceRecordSet":{
+        "Name":"api.ministack.example.com","Type":"A","TTL":300,
+        "ResourceRecords":[{"Value":"127.0.0.1"}]
+      }},
+      {"Action":"CREATE","ResourceRecordSet":{
+        "Name":"www.ministack.example.com","Type":"CNAME","TTL":300,
+        "ResourceRecords":[{"Value":"ministack.example.com"}]
+      }}
+    ]
+  }' >> "$LOG_FILE" 2>&1 || true
+ok "Route53: A + CNAME records created"
+
+# =============================================================================
+# 23. ALB
+# =============================================================================
+info "── ALB ───────────────────────────────────────────────"
+
+ALB_ARN=$($AWS elbv2 create-load-balancer \
+  --name ministack-alb \
+  --subnets "$SUBNET_PUB_A" "$SUBNET_PUB_B" \
+  --security-groups "$SG_APP" \
+  --scheme internet-facing \
+  --type application \
+  --ip-address-type ipv4 \
+  --tags Key=Name,Value=ministack-alb \
+  --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || \
+  $AWS elbv2 describe-load-balancers --names ministack-alb \
+  --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+ok "ALB: ministack-alb ($ALB_ARN)"
+
+TG_ARN=$($AWS elbv2 create-target-group \
+  --name ministack-api-tg \
+  --protocol HTTP \
+  --port 8080 \
+  --vpc-id "$VPC_ID" \
+  --target-type ip \
+  --health-check-path /health \
+  --health-check-interval-seconds 30 \
+  --tags Key=Name,Value=ministack-api-tg \
+  --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null || \
+  $AWS elbv2 describe-target-groups --names ministack-api-tg \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+ok "ALB target group: ministack-api-tg"
+
+$AWS elbv2 create-listener \
+  --load-balancer-arn "$ALB_ARN" \
+  --protocol HTTP \
+  --port 80 \
+  --default-actions "Type=forward,TargetGroupArn=${TG_ARN}" \
+  >> "$LOG_FILE" 2>&1 || true
+ok "ALB listener: HTTP:80 → ministack-api-tg"
+
+# =============================================================================
+# 24. Auto Scaling
+# =============================================================================
+info "── Auto Scaling ──────────────────────────────────────"
+
+$AWS autoscaling create-launch-configuration \
+  --launch-configuration-name ministack-lc \
+  --image-id "$AMI_ID" \
+  --instance-type t3.micro \
+  --security-groups "$SG_APP" \
+  >> "$LOG_FILE" 2>&1 || true
+ok "ASG launch config: ministack-lc"
+
+$AWS autoscaling create-auto-scaling-group \
+  --auto-scaling-group-name ministack-asg \
+  --launch-configuration-name ministack-lc \
+  --min-size 1 \
+  --max-size 4 \
+  --desired-capacity 2 \
+  --vpc-zone-identifier "${SUBNET_PUB_A},${SUBNET_PUB_B}" \
+  --tags "Key=Name,Value=ministack-asg,PropagateAtLaunch=true" \
+  >> "$LOG_FILE" 2>&1 || true
+ok "ASG: ministack-asg (min=1, desired=2, max=4)"
+
+$AWS autoscaling put-scaling-policy \
+  --auto-scaling-group-name ministack-asg \
+  --policy-name ministack-cpu-scale-out \
+  --policy-type TargetTrackingScaling \
+  --target-tracking-configuration '{
+    "PredefinedMetricSpecification":{"PredefinedMetricType":"ASGAverageCPUUtilization"},
+    "TargetValue":70.0,
+    "ScaleInCooldown":300,
+    "ScaleOutCooldown":60
+  }' >> "$LOG_FILE" 2>&1 || true
+ok "ASG scaling policy: CPU target 70%"
+
+# =============================================================================
+# 25. CloudFormation
+# =============================================================================
+info "── CloudFormation ────────────────────────────────────"
+
+$AWS s3api create-bucket --bucket ministack-cfn-artifacts >> "$LOG_FILE" 2>&1 || true
+
+$AWS cloudformation create-stack \
+  --stack-name ministack-infra \
+  --template-body '{
+    "AWSTemplateFormatVersion":"2010-09-09",
+    "Description":"MiniStack base infra stack",
+    "Parameters":{"Env":{"Type":"String","Default":"production"}},
+    "Resources":{
+      "ArtifactBucket":{
+        "Type":"AWS::S3::Bucket",
+        "Properties":{
+          "BucketName":"ministack-cfn-artifacts",
+          "Tags":[{"Key":"ManagedBy","Value":"CloudFormation"}]
+        }
+      }
+    },
+    "Outputs":{
+      "BucketName":{"Value":{"Ref":"ArtifactBucket"},"Description":"CFN artifact bucket"}
+    }
+  }' \
+  --parameters ParameterKey=Env,ParameterValue=production \
+  --tags Key=ManagedBy,Value=CloudFormation \
+  >> "$LOG_FILE" 2>&1 || true
+ok "CloudFormation stack: ministack-infra"
+
+# =============================================================================
+# 26. Cognito
+# =============================================================================
+info "── Cognito ───────────────────────────────────────────"
+
+USER_POOL_ID=$($AWS cognito-idp create-user-pool \
+  --pool-name ministack-users \
+  --policies 'PasswordPolicy={MinimumLength=8,RequireUppercase=true,RequireLowercase=true,RequireNumbers=true,RequireSymbols=false}' \
+  --auto-verified-attributes email \
+  --username-attributes email \
+  --mfa-configuration OFF \
+  --schema '[{"Name":"email","Required":true,"Mutable":true},{"Name":"role","AttributeDataType":"String","Mutable":true}]' \
+  --tags Name=ministack-users \
+  --query 'UserPool.Id' --output text 2>/dev/null || \
+  $AWS cognito-idp list-user-pools --max-results 10 \
+  --query "UserPools[?Name=='ministack-users'].Id" --output text)
+ok "Cognito user pool: ministack-users ($USER_POOL_ID)"
+
+CLIENT_ID=$($AWS cognito-idp create-user-pool-client \
+  --user-pool-id "$USER_POOL_ID" \
+  --client-name ministack-web \
+  --explicit-auth-flows ALLOW_USER_PASSWORD_AUTH ALLOW_REFRESH_TOKEN_AUTH \
+  --query 'UserPoolClient.ClientId' --output text 2>/dev/null || echo "")
+ok "Cognito app client: ministack-web ($CLIENT_ID)"
+
+$AWS cognito-idp admin-create-user \
+  --user-pool-id "$USER_POOL_ID" \
+  --username alice@example.com \
+  --user-attributes Name=email,Value=alice@example.com Name=email_verified,Value=true \
+  --temporary-password "Temp1234!" \
+  >> "$LOG_FILE" 2>&1 || true
+ok "Cognito: test user alice@example.com created"
+
+# =============================================================================
+# 27. SES
+# =============================================================================
+info "── SES ───────────────────────────────────────────────"
+
+run "SES: verify noreply@ministack.example.com" \
+  ses verify-email-identity --email-address noreply@ministack.example.com
+
+run "SES: verify alerts@ministack.example.com" \
+  ses verify-email-identity --email-address alerts@ministack.example.com
+
+$AWS sesv2 create-email-template \
+  --template-name ministack-welcome \
+  --template-content '{
+    "Subject":"Welcome to MiniStack, {{name}}!",
+    "Text":"Hi {{name}}, welcome to MiniStack. Your account is ready.",
+    "Html":"<h1>Welcome, {{name}}!</h1><p>Your MiniStack account is ready.</p>"
+  }' >> "$LOG_FILE" 2>&1 || true
+ok "SES: 2 identities verified, 1 template (ministack-welcome)"
+
+# =============================================================================
+# 28. API Gateway v2 (HTTP API)
+# =============================================================================
+info "── API Gateway v2 (HTTP API) ─────────────────────────"
+
+APIGWV2_ID=$($AWS apigatewayv2 create-api \
+  --name ministack-http-api \
+  --protocol-type HTTP \
+  --description "MiniStack HTTP API" \
+  --cors-configuration \
+    AllowOrigins='["*"]',AllowMethods='["GET","POST","PUT","DELETE"]',AllowHeaders='["Content-Type","Authorization"]' \
+  --query 'ApiId' --output text 2>/dev/null || \
+  $AWS apigatewayv2 get-apis \
+  --query "Items[?Name=='ministack-http-api'].ApiId" --output text)
+ok "API Gateway v2: ministack-http-api ($APIGWV2_ID)"
+
+LAMBDA_INTEG_ID=$($AWS apigatewayv2 create-integration \
+  --api-id "$APIGWV2_ID" \
+  --integration-type AWS_PROXY \
+  --integration-uri "arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:ministack-api-handler" \
+  --payload-format-version "2.0" \
+  --query 'IntegrationId' --output text 2>/dev/null || echo "")
+
+if [[ -n "$LAMBDA_INTEG_ID" ]]; then
+  $AWS apigatewayv2 create-route --api-id "$APIGWV2_ID" \
+    --route-key "GET /v2/items" \
+    --target "integrations/${LAMBDA_INTEG_ID}" >> "$LOG_FILE" 2>&1 || true
+  $AWS apigatewayv2 create-route --api-id "$APIGWV2_ID" \
+    --route-key "POST /v2/items" \
+    --target "integrations/${LAMBDA_INTEG_ID}" >> "$LOG_FILE" 2>&1 || true
+fi
+
+$AWS apigatewayv2 create-stage \
+  --api-id "$APIGWV2_ID" \
+  --stage-name dev \
+  --auto-deploy >> "$LOG_FILE" 2>&1 || true
+ok "API Gateway v2: GET+POST /v2/items + dev stage"
+
+# =============================================================================
+# 29. EBS
+# =============================================================================
+info "── EBS ───────────────────────────────────────────────"
+
+EBS_DATA_VOL=$($AWS ec2 create-volume \
+  --availability-zone us-east-1a \
+  --size 20 \
+  --volume-type gp3 \
+  --throughput 125 \
+  --iops 3000 \
+  --encrypted \
+  --kms-key-id "$KEY_ID" \
+  --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value=ministack-data-vol}]' \
+  --query 'VolumeId' --output text 2>/dev/null || echo "")
+ok "EBS volume: ministack-data-vol 20GB gp3 enc ($EBS_DATA_VOL)"
+
+EBS_DB_VOL=$($AWS ec2 create-volume \
+  --availability-zone us-east-1a \
+  --size 100 \
+  --volume-type io2 \
+  --iops 10000 \
+  --encrypted \
+  --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value=ministack-db-vol}]' \
+  --query 'VolumeId' --output text 2>/dev/null || echo "")
+ok "EBS volume: ministack-db-vol 100GB io2 enc ($EBS_DB_VOL)"
+
+$AWS ec2 create-snapshot \
+  --volume-id "$EBS_DATA_VOL" \
+  --description "MiniStack data-vol seed snapshot" \
+  --tag-specifications 'ResourceType=snapshot,Tags=[{Key=Name,Value=ministack-data-snapshot}]' \
+  >> "$LOG_FILE" 2>&1 || true
+ok "EBS snapshot: ministack-data-snapshot"
+
+# =============================================================================
+# 30. AppConfig
+# =============================================================================
+info "── AppConfig ─────────────────────────────────────────"
+
+APP_CFG_ID=$($AWS appconfig create-application \
+  --name ministack \
+  --description "MiniStack application configuration" \
+  --tags Name=ministack \
+  --query 'Id' --output text 2>/dev/null || \
+  $AWS appconfig list-applications \
+  --query "Items[?Name=='ministack'].Id" --output text)
+ok "AppConfig application: ministack ($APP_CFG_ID)"
+
+ENV_CFG_ID=$($AWS appconfig create-environment \
+  --application-id "$APP_CFG_ID" \
+  --name production \
+  --description "Production environment" \
+  --query 'Id' --output text 2>/dev/null || echo "")
+ok "AppConfig environment: production ($ENV_CFG_ID)"
+
+PROFILE_ID=$($AWS appconfig create-configuration-profile \
+  --application-id "$APP_CFG_ID" \
+  --name feature-flags \
+  --location-uri hosted \
+  --type AWS.AppConfig.FeatureFlags \
+  --query 'Id' --output text 2>/dev/null || echo "")
+ok "AppConfig profile: feature-flags ($PROFILE_ID)"
+
+if [[ -n "$PROFILE_ID" && -n "$APP_CFG_ID" ]]; then
+  $AWS appconfig create-hosted-configuration-version \
+    --application-id "$APP_CFG_ID" \
+    --configuration-profile-id "$PROFILE_ID" \
+    --content-type "application/json" \
+    --content '{"flags":{"dark_mode":{"enabled":false},"new_checkout":{"enabled":true},"beta_search":{"enabled":true}},"version":"1"}' \
+    /tmp/appconfig_out.json >> "$LOG_FILE" 2>&1 || true
+  ok "AppConfig: hosted config v1 created"
+fi
+
+# =============================================================================
+# 31. Organizations
+# =============================================================================
+info "── Organizations ─────────────────────────────────────"
+
+ORG_ID=$($AWS organizations create-organization --feature-set ALL \
+  --query 'Organization.Id' --output text 2>/dev/null || \
+  $AWS organizations describe-organization \
+  --query 'Organization.Id' --output text)
+ok "Organizations: org ready ($ORG_ID)"
+
+ROOT_ID=$($AWS organizations list-roots --query 'Roots[0].Id' --output text 2>/dev/null || echo "")
+
+if [[ -n "$ROOT_ID" ]]; then
+  DEV_OU=$($AWS organizations create-organizational-unit \
+    --parent-id "$ROOT_ID" --name Development \
+    --query 'OrganizationalUnit.Id' --output text 2>/dev/null || echo "")
+  ok "Organizations OU: Development ($DEV_OU)"
+
+  PROD_OU=$($AWS organizations create-organizational-unit \
+    --parent-id "$ROOT_ID" --name Production \
+    --query 'OrganizationalUnit.Id' --output text 2>/dev/null || echo "")
+  ok "Organizations OU: Production ($PROD_OU)"
+fi
+
+# =============================================================================
+# 32. CodeBuild
+# =============================================================================
+info "── CodeBuild ─────────────────────────────────────────"
+
+$AWS codebuild create-project \
+  --name ministack-ci \
+  --source '{"type":"NO_SOURCE","buildspec":"version:0.2\nphases:\n  build:\n    commands:\n      - echo Build complete"}' \
+  --artifacts '{"type":"S3","location":"ministack-processed-data","name":"build-artifacts"}' \
+  --environment '{
+    "type":"LINUX_CONTAINER",
+    "computeType":"BUILD_GENERAL1_SMALL",
+    "image":"aws/codebuild/standard:7.0",
+    "environmentVariables":[
+      {"name":"NODE_ENV","value":"test"},
+      {"name":"AWS_REGION","value":"us-east-1"}
+    ]
+  }' \
+  --service-role "$LAMBDA_ROLE_ARN" \
+  --logs-config '{
+    "cloudWatchLogs":{"status":"ENABLED","groupName":"/aws/codebuild/ministack-ci"},
+    "s3Logs":{"status":"DISABLED"}
+  }' \
+  --tags key=Name,value=ministack-ci \
+  >> "$LOG_FILE" 2>&1 || true
+ok "CodeBuild project: ministack-ci"
+
+# =============================================================================
+# 33. Athena
+# =============================================================================
+info "── Athena ────────────────────────────────────────────"
+
+run "Athena workgroup: ministack" \
+  athena create-work-group \
+  --name ministack \
+  --configuration 'ResultConfiguration={OutputLocation=s3://ministack-processed-data/athena-results/},EnforceWorkGroupConfiguration=true,PublishCloudWatchMetricsEnabled=true' \
+  --description "MiniStack analytics workgroup" \
+  --tags Key=Name,Value=ministack
+
+$AWS athena start-query-execution \
+  --query-string "CREATE DATABASE IF NOT EXISTS ministack_analytics COMMENT 'MiniStack analytics'" \
+  --work-group ministack \
+  >> "$LOG_FILE" 2>&1 || true
+
+QUERY_ID=$($AWS athena start-query-execution \
+  --query-string "SELECT type, COUNT(*) AS cnt FROM ministack_raw.events GROUP BY type" \
+  --work-group ministack \
+  --query-execution-context Database=ministack_raw \
+  --query 'QueryExecutionId' --output text 2>/dev/null || echo "")
+ok "Athena: workgroup + DB + sample query (${QUERY_ID:-n/a})"
+
+# =============================================================================
+# 34. CloudTrail
+# =============================================================================
+info "── CloudTrail ────────────────────────────────────────"
+
+$AWS s3api create-bucket --bucket ministack-audit-logs >> "$LOG_FILE" 2>&1 || true
+$AWS s3api put-bucket-policy --bucket ministack-audit-logs --policy '{
+  "Version":"2012-10-17",
+  "Statement":[
+    {"Effect":"Allow","Principal":{"Service":"cloudtrail.amazonaws.com"},
+     "Action":"s3:PutObject","Resource":"arn:aws:s3:::ministack-audit-logs/AWSLogs/*"},
+    {"Effect":"Allow","Principal":{"Service":"cloudtrail.amazonaws.com"},
+     "Action":"s3:GetBucketAcl","Resource":"arn:aws:s3:::ministack-audit-logs"}
+  ]}' >> "$LOG_FILE" 2>&1 || true
+
+$AWS cloudtrail create-trail \
+  --name ministack-audit \
+  --s3-bucket-name ministack-audit-logs \
+  --include-global-service-events \
+  --is-multi-region-trail \
+  --enable-log-file-validation \
+  >> "$LOG_FILE" 2>&1 || true
+$AWS cloudtrail start-logging --name ministack-audit >> "$LOG_FILE" 2>&1 || true
+ok "CloudTrail: ministack-audit (multi-region, validation enabled)"
+
+# =============================================================================
+# 35. RDS
+# =============================================================================
+info "── RDS ───────────────────────────────────────────────"
+
+$AWS rds create-db-subnet-group \
+  --db-subnet-group-name ministack-db-subnet \
+  --db-subnet-group-description "MiniStack DB subnet group" \
+  --subnet-ids "$SUBNET_PRIV_A" \
+  --tags Key=Name,Value=ministack-db-subnet \
+  >> "$LOG_FILE" 2>&1 || true
+ok "RDS subnet group: ministack-db-subnet"
+
+$AWS rds create-db-instance \
+  --db-instance-identifier ministack-postgres \
+  --db-instance-class db.t3.micro \
+  --engine postgres \
+  --engine-version "15.4" \
+  --master-username ministack_admin \
+  --master-user-password "S3cr3tP4ss!" \
+  --allocated-storage 20 \
+  --storage-type gp3 \
+  --db-subnet-group-name ministack-db-subnet \
+  --vpc-security-group-ids "$SG_APP" \
+  --db-name ministack \
+  --no-multi-az \
+  --no-publicly-accessible \
+  --tags Key=Name,Value=ministack-postgres \
+  >> "$LOG_FILE" 2>&1 || true
+ok "RDS: ministack-postgres (postgres 15.4 / db.t3.micro / 20GB gp3)"
+
+# =============================================================================
+# 36. ElastiCache
+# =============================================================================
+info "── ElastiCache ───────────────────────────────────────"
+
+$AWS elasticache create-cache-subnet-group \
+  --cache-subnet-group-name ministack-cache-subnet \
+  --cache-subnet-group-description "MiniStack cache subnet group" \
+  --subnet-ids "$SUBNET_PRIV_A" \
+  >> "$LOG_FILE" 2>&1 || true
+ok "ElastiCache subnet group: ministack-cache-subnet"
+
+$AWS elasticache create-replication-group \
+  --replication-group-id ministack-redis \
+  --replication-group-description "MiniStack Redis cache" \
+  --cache-node-type cache.t3.micro \
+  --engine redis \
+  --engine-version "7.0" \
+  --num-cache-clusters 1 \
+  --cache-subnet-group-name ministack-cache-subnet \
+  --security-group-ids "$SG_APP" \
+  --tags Key=Name,Value=ministack-redis \
+  >> "$LOG_FILE" 2>&1 || true
+ok "ElastiCache: ministack-redis (Redis 7.0 / cache.t3.micro)"
+
+# =============================================================================
+# 37. OpenSearch
+# =============================================================================
+info "── OpenSearch ────────────────────────────────────────"
+
+$AWS opensearch create-domain \
+  --domain-name ministack-search \
+  --engine-version "OpenSearch_2.11" \
+  --cluster-config '{"InstanceType":"t3.small.search","InstanceCount":1,"DedicatedMasterEnabled":false}' \
+  --ebs-options 'EBSEnabled=true,VolumeType=gp3,VolumeSize=10' \
+  --access-policies '{
+    "Version":"2012-10-17",
+    "Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"es:*","Resource":"*"}]
+  }' \
+  --tags Key=Name,Value=ministack-search \
+  >> "$LOG_FILE" 2>&1 || true
+ok "OpenSearch: ministack-search (OpenSearch 2.11 / t3.small / 10GB)"
+
+# =============================================================================
+# 38. CloudFront
+# =============================================================================
+info "── CloudFront ────────────────────────────────────────"
+
+$AWS cloudfront create-distribution \
+  --distribution-config '{
+    "CallerReference":"ministack-cf-001",
+    "Comment":"MiniStack CDN",
+    "Enabled":true,
+    "Origins":{"Quantity":1,"Items":[{
+      "Id":"ministack-s3-origin",
+      "DomainName":"ministack-raw-data.s3.us-east-1.amazonaws.com",
+      "S3OriginConfig":{"OriginAccessIdentity":""}
+    }]},
+    "DefaultCacheBehavior":{
+      "ViewerProtocolPolicy":"redirect-to-https",
+      "TargetOriginId":"ministack-s3-origin",
+      "TrustedSigners":{"Enabled":false,"Quantity":0},
+      "ForwardedValues":{"QueryString":false,"Cookies":{"Forward":"none"}},
+      "MinTTL":0,"DefaultTTL":86400,"MaxTTL":31536000
+    }
+  }' >> "$LOG_FILE" 2>&1 || true
+ok "CloudFront: ministack distribution created"
+
+# =============================================================================
+# 39. EFS
+# =============================================================================
+info "── EFS ───────────────────────────────────────────────"
+
+EFS_ID=$($AWS efs create-file-system \
+  --performance-mode generalPurpose \
+  --throughput-mode bursting \
+  --encrypted \
+  --kms-key-id "$KEY_ID" \
+  --tags Key=Name,Value=ministack-efs \
+  --query 'FileSystemId' --output text 2>/dev/null || \
+  $AWS efs describe-file-systems \
+  --query "FileSystems[?Tags[?Key=='Name'&&Value=='ministack-efs']].FileSystemId" \
+  --output text)
+ok "EFS: ministack-efs ($EFS_ID)"
+
+$AWS efs create-mount-target \
+  --file-system-id "$EFS_ID" \
+  --subnet-id "$SUBNET_PRIV_A" \
+  --security-groups "$SG_APP" \
+  >> "$LOG_FILE" 2>&1 || true
+ok "EFS mount target: private-a"
+
+# =============================================================================
+# 40. Batch
+# =============================================================================
+info "── Batch ─────────────────────────────────────────────"
+
+$AWS batch create-compute-environment \
+  --compute-environment-name ministack-batch-fargate \
+  --type MANAGED \
+  --state ENABLED \
+  --compute-resources '{
+    "type":"FARGATE",
+    "maxvCpus":16,
+    "subnets":["'"$SUBNET_PRIV_A"'"],
+    "securityGroupIds":["'"$SG_APP"'"]
+  }' \
+  --service-role "arn:aws:iam::${ACCOUNT_ID}:role/AWSBatchServiceRole" \
+  >> "$LOG_FILE" 2>&1 || true
+ok "Batch compute environment: ministack-batch-fargate (Fargate)"
+
+$AWS batch create-job-queue \
+  --job-queue-name ministack-jobs \
+  --state ENABLED \
+  --priority 100 \
+  --compute-environment-order '[{"order":1,"computeEnvironment":"ministack-batch-fargate"}]' \
+  >> "$LOG_FILE" 2>&1 || true
+ok "Batch job queue: ministack-jobs"
+
+$AWS batch register-job-definition \
+  --job-definition-name ministack-etl-job \
+  --type container \
+  --platform-capabilities FARGATE \
+  --container-properties '{
+    "image":"ministack/worker:latest",
+    "resourceRequirements":[{"type":"VCPU","value":"1"},{"type":"MEMORY","value":"2048"}],
+    "executionRoleArn":"'"$LAMBDA_ROLE_ARN"'",
+    "jobRoleArn":"'"$LAMBDA_ROLE_ARN"'",
+    "networkConfiguration":{"assignPublicIp":"ENABLED"},
+    "environment":[{"name":"JOB_TYPE","value":"etl"}]
+  }' >> "$LOG_FILE" 2>&1 || true
+ok "Batch job definition: ministack-etl-job"
+
+# =============================================================================
+# 41. DynamoDB Streams (enable on existing tables)
+# =============================================================================
+info "── DynamoDB Streams ──────────────────────────────────"
+
+$AWS dynamodb update-table \
+  --table-name ministack-users \
+  --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES \
+  >> "$LOG_FILE" 2>&1 || true
+ok "DynamoDB Streams: enabled on ministack-users (NEW_AND_OLD_IMAGES)"
+
+$AWS dynamodb update-table \
+  --table-name ministack-events \
+  --stream-specification StreamEnabled=true,StreamViewType=NEW_IMAGE \
+  >> "$LOG_FILE" 2>&1 || true
+ok "DynamoDB Streams: enabled on ministack-events (NEW_IMAGE)"
+
+# =============================================================================
 # Done
 # =============================================================================
 echo ""
@@ -829,21 +1563,46 @@ echo " Seed complete!  $(date)"                               | tee -a "$LOG_FIL
 echo "=====================================================" | tee -a "$LOG_FILE"
 echo ""
 echo "Resources created per service:"
-echo "  KMS             2 keys, 2 aliases"
-echo "  IAM             4 roles, 1 policy, 2 users"
-echo "  VPC             1 VPC, 3 subnets, 1 IGW, 2 SGs, 2 EC2 instances"
-echo "  S3              4 buckets, 4 objects"
-echo "  DynamoDB        3 tables, 7 items"
-echo "  SQS             4 queues, 2 messages"
-echo "  SNS             2 topics, 1 subscription, 1 message"
-echo "  CloudWatch      3 log groups, 1 log stream, 2 alarms, 2 metrics"
-echo "  Kinesis         2 streams, 3 records"
-echo "  Lambda          2 functions, 1 test invocation"
-echo "  Firehose        1 delivery stream"
-echo "  API Gateway     1 REST API, 2 resources, 2 stages"
-echo "  EventBridge     1 bus, 2 rules, 2 targets"
-echo "  Glue            2 databases, 2 tables, 1 job, 1 crawler"
-echo "  Step Functions  2 state machines, 1 execution"
-echo "  WAF             1 IP set, 1 Web ACL"
+echo "  1.  KMS              2 keys, 2 aliases"
+echo "  2.  IAM              4 roles, 1 policy, 2 users"
+echo "  3.  VPC              1 VPC, 3 subnets, 1 IGW, 1 SG, 2 EC2 instances"
+echo "  4.  S3               6 buckets, 4 objects"
+echo "  5.  DynamoDB         3 tables, 7 items, 2 streams"
+echo "  6.  SQS              4 queues, 2 messages"
+echo "  7.  SNS              2 topics, 1 subscription, 1 message"
+echo "  8.  CloudWatch       3 log groups, 1 log stream, 2 alarms, 2 metrics"
+echo "  9.  Kinesis          2 streams, 3 records"
+echo "  10. Lambda           2 functions, 1 test invocation"
+echo "  11. Firehose         1 delivery stream"
+echo "  12. API Gateway      1 REST API, 2 resources, 2 stages"
+echo "  13. EventBridge      1 bus, 2 rules, 2 targets"
+echo "  14. Glue             2 databases, 2 tables, 1 job, 1 crawler"
+echo "  15. Step Functions   2 state machines, 1 execution"
+echo "  16. WAF              1 IP set, 1 Web ACL"
+echo "  17. Secrets Manager  2 secrets"
+echo "  18. SSM              4 parameters"
+echo "  19. ACM              1 certificate"
+echo "  20. ECR              2 repositories"
+echo "  21. ECS              1 cluster, 2 task definitions"
+echo "  22. Route53          1 hosted zone, 2 records"
+echo "  23. ALB              1 load balancer, 1 target group, 1 listener"
+echo "  24. Auto Scaling     1 launch config, 1 ASG, 1 scaling policy"
+echo "  25. CloudFormation   1 stack"
+echo "  26. Cognito          1 user pool, 1 app client, 1 user"
+echo "  27. SES              2 identities, 1 template"
+echo "  28. API Gateway v2   1 HTTP API, 2 routes, 1 stage"
+echo "  29. EBS              2 volumes, 1 snapshot"
+echo "  30. AppConfig        1 app, 1 env, 1 profile, 1 config version"
+echo "  31. Organizations    1 org, 2 OUs"
+echo "  32. CodeBuild        1 project"
+echo "  33. Athena           1 workgroup, 1 database, 1 query"
+echo "  34. CloudTrail       1 trail (multi-region)"
+echo "  35. RDS              1 DB instance (postgres 15.4)"
+echo "  36. ElastiCache      1 Redis replication group"
+echo "  37. OpenSearch       1 domain"
+echo "  38. CloudFront       1 distribution"
+echo "  39. EFS              1 file system, 1 mount target"
+echo "  40. Batch            1 compute env, 1 job queue, 1 job definition"
+echo "  41. DynamoDB Streams 2 streams enabled"
 echo ""
 echo "Log: $LOG_FILE"
