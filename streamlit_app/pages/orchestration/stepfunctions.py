@@ -1,5 +1,16 @@
+import json
+
 import streamlit as st
 from aws_client import client
+
+
+def _format_json(raw: str) -> str:
+    if not raw:
+        return ""
+    try:
+        return json.dumps(json.loads(raw), indent=2)
+    except (json.JSONDecodeError, TypeError):
+        return raw
 
 
 STATUS_ICON = {
@@ -73,7 +84,7 @@ def render():
         st.code(sm_arn, language="text")
 
     with st.expander("Definition (ASL)"):
-        st.code(desc.get("definition", ""), language="json")
+        st.code(_format_json(desc.get("definition", "")), language="json")
 
     # Recent executions
     st.divider()
@@ -101,10 +112,10 @@ def render():
                 try:
                     ex_desc = sf.describe_execution(executionArn=exec_arn)
                     with st.expander("Input"):
-                        st.code(ex_desc.get("input", ""), language="json")
+                        st.code(_format_json(ex_desc.get("input", "")), language="json")
                     if ex_desc.get("output"):
                         with st.expander("Output"):
-                            st.code(ex_desc["output"], language="json")
+                            st.code(_format_json(ex_desc["output"]), language="json")
                     if ex_desc.get("error"):
                         st.error(f"Error: {ex_desc['error']} — {ex_desc.get('cause', '')}")
                 except Exception as e:

@@ -5,6 +5,11 @@ import {
   GetJobsCommand,
   GetJobRunsCommand,
   GetCrawlersCommand,
+  ListRegistriesCommand,
+  ListSchemasCommand,
+  GetSchemaCommand,
+  ListSchemaVersionsCommand,
+  GetSchemaVersionCommand,
 } from '@aws-sdk/client-glue'
 
 export const listDatabases = () =>
@@ -21,3 +26,24 @@ export const listJobRuns = (JobName: string) =>
 
 export const listCrawlers = () =>
   withTimeout(glue.send(new GetCrawlersCommand({}))).then(r => r.Crawlers ?? [])
+
+export const listRegistries = () =>
+  withTimeout(glue.send(new ListRegistriesCommand({}))).then(r => r.Registries ?? [])
+
+export const listSchemas = (RegistryName: string) =>
+  withTimeout(glue.send(new ListSchemasCommand({ RegistryId: { RegistryName } }))).then(
+    r => r.Schemas ?? [],
+  )
+
+export const getSchema = (RegistryName: string, SchemaName: string) =>
+  withTimeout(
+    glue.send(new GetSchemaCommand({ SchemaId: { RegistryName, SchemaName } })),
+  )
+
+export const listSchemaVersions = (RegistryName: string, SchemaName: string) =>
+  withTimeout(
+    glue.send(new ListSchemaVersionsCommand({ SchemaId: { RegistryName, SchemaName } })),
+  ).then(r => r.Schemas ?? [])
+
+export const getSchemaVersion = (SchemaVersionId: string) =>
+  withTimeout(glue.send(new GetSchemaVersionCommand({ SchemaVersionId })))

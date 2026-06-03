@@ -7,6 +7,15 @@ const EX_BADGE: Record<string, string> = {
   TIMED_OUT: 'bg-warning text-dark', ABORTED: 'bg-secondary',
 }
 
+function formatJson(raw: string | undefined): string {
+  if (!raw) return '—'
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
+
 export default function StepFunctionsPage() {
   const [selSm, setSelSm] = useState('')
   const [selEx, setSelEx] = useState('')
@@ -50,8 +59,8 @@ export default function StepFunctionsPage() {
 
             <details className="mb-3">
               <summary className="text-muted small" style={{ cursor: 'pointer' }}>Definition (ASL)</summary>
-              <pre className="border rounded p-2 bg-light mt-1" style={{ fontSize: 11, maxHeight: 200, overflow: 'auto' }}>
-                {desc.definition}
+              <pre className="border rounded p-2 bg-light mt-1 font-monospace" style={{ fontSize: 11, maxHeight: 360, overflow: 'auto', whiteSpace: 'pre' }}>
+                {formatJson(desc.definition)}
               </pre>
             </details>
 
@@ -80,11 +89,11 @@ export default function StepFunctionsPage() {
                 <p className="text-uppercase text-muted mb-2" style={{ fontSize: 11, fontWeight: 500 }}>Execution Detail</p>
                 {exDesc.error && <div className="alert alert-danger py-1 px-2 mb-2" style={{ fontSize: 12 }}>{exDesc.error}: {exDesc.cause}</div>}
                 <details open><summary className="text-muted small" style={{ cursor: 'pointer' }}>Input</summary>
-                  <pre className="bg-light p-2 rounded mt-1" style={{ fontSize: 11, maxHeight: 150, overflow: 'auto' }}>{exDesc.input}</pre>
+                  <pre className="bg-light p-2 rounded mt-1 font-monospace" style={{ fontSize: 11, maxHeight: 240, overflow: 'auto', whiteSpace: 'pre' }}>{formatJson(exDesc.input)}</pre>
                 </details>
                 {exDesc.output && (
                   <details className="mt-1"><summary className="text-muted small" style={{ cursor: 'pointer' }}>Output</summary>
-                    <pre className="bg-light p-2 rounded mt-1" style={{ fontSize: 11, maxHeight: 150, overflow: 'auto' }}>{exDesc.output}</pre>
+                    <pre className="bg-light p-2 rounded mt-1 font-monospace" style={{ fontSize: 11, maxHeight: 240, overflow: 'auto', whiteSpace: 'pre' }}>{formatJson(exDesc.output)}</pre>
                   </details>
                 )}
               </div>

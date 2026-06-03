@@ -714,6 +714,52 @@ $AWS glue create-crawler \
   >> "$LOG_FILE" 2>&1 || true
 ok "Glue crawler: ministack-raw-events"
 
+# Glue Schema Registry (catalog schemas for demo streams / tables)
+EVENT_AVRO_V1='{"type":"record","name":"Event","fields":[{"name":"id","type":"string"},{"name":"type","type":"string"},{"name":"ts","type":"string"},{"name":"userId","type":"string"}]}'
+EVENT_AVRO_V2='{"type":"record","name":"Event","fields":[{"name":"id","type":"string"},{"name":"type","type":"string"},{"name":"ts","type":"string"},{"name":"userId","type":"string"},{"name":"source","type":"string","default":""}]}'
+USER_AVRO_V1='{"type":"record","name":"User","fields":[{"name":"id","type":"int"},{"name":"name","type":"string"},{"name":"email","type":"string"},{"name":"role","type":"string"},{"name":"created_at","type":"string"}]}'
+ORDER_AVRO_V1='{"type":"record","name":"Order","fields":[{"name":"orderId","type":"string"},{"name":"userId","type":"string"},{"name":"amount","type":"double"},{"name":"status","type":"string"}]}'
+
+run "Glue registry: ministack-demo" \
+  glue create-registry \
+  --registry-name ministack-demo \
+  --description "'Demo schema registry for MiniStack UI'"
+
+run "Glue schema: events (v1)" \
+  glue create-schema \
+  --registry-id RegistryName=ministack-demo \
+  --schema-name events \
+  --data-format AVRO \
+  --compatibility BACKWARD \
+  --description "'Kinesis events (ministack_raw.events)'" \
+  --schema-definition "'$EVENT_AVRO_V1'"
+
+run "Glue schema: users" \
+  glue create-schema \
+  --registry-id RegistryName=ministack-demo \
+  --schema-name users \
+  --data-format AVRO \
+  --compatibility BACKWARD \
+  --description "'User CSV export (ministack_raw.users)'" \
+  --schema-definition "'$USER_AVRO_V1'"
+
+run "Glue schema: orders" \
+  glue create-schema \
+  --registry-id RegistryName=ministack-demo \
+  --schema-name orders \
+  --data-format AVRO \
+  --compatibility FULL \
+  --description "'Order pipeline (ministack-orders)'" \
+  --schema-definition "'$ORDER_AVRO_V1'"
+
+if eval "$AWS glue register-schema-version \
+  --schema-id RegistryName=ministack-demo,SchemaName=events \
+  --schema-definition '$EVENT_AVRO_V2'" >> "$LOG_FILE" 2>&1; then
+  ok "Glue schema version: events v2 (backward-compatible)"
+else
+  warn "Glue schema version: events v2 (already exists or skipped)"
+fi
+
 # =============================================================================
 # 15. Step Functions
 # =============================================================================
@@ -1576,7 +1622,7 @@ echo "  10. Lambda           2 functions, 1 test invocation"
 echo "  11. Firehose         1 delivery stream"
 echo "  12. API Gateway      1 REST API, 2 resources, 2 stages"
 echo "  13. EventBridge      1 bus, 2 rules, 2 targets"
-echo "  14. Glue             2 databases, 2 tables, 1 job, 1 crawler"
+echo "  14. Glue             2 databases, 2 tables, 1 job, 1 crawler, 1 registry, 3 schemas"
 echo "  15. Step Functions   2 state machines, 1 execution"
 echo "  16. WAF              1 IP set, 1 Web ACL"
 echo "  17. Secrets Manager  2 secrets"
